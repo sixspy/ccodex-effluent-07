@@ -34,6 +34,7 @@ class SampleIn(BaseModel):
     metrics: MetricsIn
     flow_m3h: float = Field(gt=0, lt=50000)
     sample_code: str | None = None
+    parent_sample_id: int | None = None
 
 
 class ExceedOpenIn(BaseModel):

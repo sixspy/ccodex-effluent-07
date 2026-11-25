@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
+from metric_lineage_svc import lineage_complete
 from models import SealIn
 from validators import metric_summary, validate_sample_sealable
 
@@ -39,6 +40,8 @@ def create_seal(body: SealIn, authorization: AuthHeader = None):
             if not sample:
                 raise HTTPException(404, "采样批次不存在")
             validate_sample_sealable(sample["status"])
+            if not lineage_complete(conn, sample):
+                raise HTTPException(400, "无边批禁止升代：血缘父子边缺失")
             open_hold = conn.execute(
                 "SELECT id FROM exceed_holds WHERE sample_id=? AND status='开放'",
                 (body.sample_id,),

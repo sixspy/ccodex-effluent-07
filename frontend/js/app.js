@@ -53,7 +53,7 @@ createApp({
     });
     const sampleForm = ref({
       outfall_id: 1, permit_ref: "DP-2026-E01", sample_code: "",
-      cod: 35, nh3n: 2.5, tp: 0.2, flow_m3h: 1800,
+      cod: 35, nh3n: 2.5, tp: 0.2, flow_m3h: 1800, parent_sample_id: null,
     });
     const releaseForm = ref({ sample_id: 0, officer: "值班员" });
     const sealForm = ref({ sample_id: 0, snapshot: "" });
@@ -62,7 +62,7 @@ createApp({
       cod_cap: 50, nh3n_cap: 5, tp_cap: 0.5, period_label: "2026Q4",
     });
     const lineageForm = ref({
-      from_sample_id: 1, to_sample_id: 2, edge_type: "复测续批", detail: "试验血缘",
+      from_sample_id: 1, to_sample_id: 2, edge_type: "parent_child", detail: "试验血缘",
     });
     const labForm = ref({ sample_code: "SM-OF-E1-A-001", courier_slot: "A1" });
     const sludgeForm = ref({ plant_id: 1, digester_bay: "D-01" });
@@ -155,6 +155,7 @@ createApp({
         outfall_id: sampleForm.value.outfall_id,
         permit_ref: sampleForm.value.permit_ref,
         sample_code: sampleForm.value.sample_code || null,
+        parent_sample_id: sampleForm.value.parent_sample_id || null,
         flow_m3h: sampleForm.value.flow_m3h,
         metrics: {
           cod: sampleForm.value.cod,

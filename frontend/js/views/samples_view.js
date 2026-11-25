@@ -3,12 +3,13 @@ export const samplesViewTemplate = `
     <div class="panel">
       <h3>采样批次</h3>
       <table>
-        <thead><tr><th>编号</th><th>口</th><th>许可</th><th>流量</th><th>状态</th><th>代</th></tr></thead>
+        <thead><tr><th>编号</th><th>口</th><th>许可</th><th>流量</th><th>状态</th><th>代</th><th>血统</th></tr></thead>
         <tbody>
           <tr v-for="s in samples" :key="s.id" @click="loadSample(s.id)" style="cursor:pointer">
             <td>{{ s.sample_code }}</td><td>{{ s.outfall_code }}</td><td>{{ s.permit_ref }}</td>
             <td>{{ s.flow_m3h }}</td><td :class="sampleClass(s.status)">{{ s.status }}</td>
             <td>{{ s.generation }}</td>
+            <td :class="s.lineage_ok?'pass':'fail'">{{ s.lineage_ok ? "齐全" : "断链" }}</td>
           </tr>
         </tbody>
       </table>
@@ -19,6 +20,7 @@ export const samplesViewTemplate = `
           <span>挂起</span><span>{{ sampleDetail.exceed_holds.length }}</span>
           <span>准排</span><span>{{ sampleDetail.discharge_releases.length }}</span>
           <span>封批</span><span>{{ sampleDetail.discharge_seals.length }}</span>
+          <span>父子边</span><span>{{ sampleDetail.parent_edge ? ("#" + sampleDetail.parent_edge.id + " " + sampleDetail.parent_edge.from_code + "→" + sampleDetail.sample.sample_code) : "—（根批或断链）" }}</span>
         </div>
       </div>
     </div>
@@ -35,6 +37,8 @@ export const samplesViewTemplate = `
         <div><label>流量 m3/h</label><input type="number" v-model.number="sampleForm.flow_m3h"/></div>
       </div>
       <label>编号（可空自动）</label><input v-model="sampleForm.sample_code"/>
+      <label>续采父批 ID（可空自动衔接同口最新批，首批为根）</label>
+      <input type="number" v-model.number="sampleForm.parent_sample_id"/>
       <div class="actions"><button @click="createSample">入库</button></div>
     </div>
   </div>`;

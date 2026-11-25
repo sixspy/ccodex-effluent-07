@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-DB_PATH = DATA / "app.db"
+DB_PATH = Path(os.environ.get("EFFLUENT_DB_PATH", str(DATA / "app.db")))
 FIXTURES = ROOT / "fixtures"
 FRONTEND = ROOT / "frontend"
 
@@ -36,6 +37,13 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def connect_try() -> sqlite3.Connection:
+    """零等待连接：抢锁专用，抢不到立即报忙，不排队。"""
+    conn = sqlite3.connect(DB_PATH, timeout=0)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -144,6 +152,7 @@ CREATE TABLE IF NOT EXISTS metric_lineage(
   to_sample_id INTEGER,
   edge_type TEXT NOT NULL,
   detail TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '正式',
   created_at TEXT NOT NULL,
   FOREIGN KEY(from_sample_id) REFERENCES sample_batches(id)
 );
@@ -430,21 +439,33 @@ def seed_lineage(conn: sqlite3.Connection) -> None:
         ).fetchone():
             continue
         conn.execute(
-            """INSERT INTO metric_lineage(from_sample_id,to_sample_id,edge_type,detail,created_at)
-               VALUES (?,?,?,?,?)""",
+            """INSERT INTO metric_lineage(from_sample_id,to_sample_id,edge_type,detail,status,created_at)
+               VALUES (?,?,?,?,?,?)""",
             (
                 fr["id"],
                 to_id,
                 row["edge_type"],
                 row["detail"],
+                row.get("status", "正式"),
                 row.get("created_at", now_iso()),
             ),
         )
 
 
+def _migrate_lineage_status(conn: sqlite3.Connection) -> None:
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(metric_lineage)")]
+    if "status" not in cols:
+        conn.execute(
+            "ALTER TABLE metric_lineage ADD COLUMN status TEXT NOT NULL DEFAULT '正式'"
+        )
+
+
 def init_db() -> None:
     with connect() as conn:
+        # WAL：读者不阻塞写者、写者不阻塞读者，抢锁轮询读永不被排他窗挡住。
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
+        _migrate_lineage_status(conn)
         seed_users(conn)
         seed_plants(conn)
         seed_outfalls(conn)

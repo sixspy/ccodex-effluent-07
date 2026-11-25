@@ -6,6 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
+from metric_lineage_svc import lineage_complete
 from validators import validate_permit_match
 
 router = APIRouter(tags=["reconcile"])
@@ -41,7 +42,8 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         "SELECT * FROM discharge_permits WHERE permit_code=?", (permit_code,)
     ).fetchone()
     samples = conn.execute(
-        """SELECT sample_code, flow_m3h, metrics, status, generation FROM sample_batches
+        """SELECT id, outfall_id, sample_code, flow_m3h, metrics, status, generation
+           FROM sample_batches
            WHERE permit_ref=? AND status NOT IN ('作废')""",
         (permit_code,),
     ).fetchall()
@@ -59,6 +61,7 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
     }
     details = []
     all_ok = True
+    lineage_missing = []
     for s in samples:
         metrics = json.loads(s["metrics"] or "{}")
         ok = validate_permit_match(
@@ -66,6 +69,9 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         )
         if not ok:
             all_ok = False
+        l_ok = lineage_complete(conn, s)
+        if not l_ok:
+            lineage_missing.append(s["sample_code"])
         details.append(
             {
                 "sample_code": s["sample_code"],
@@ -74,6 +80,7 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
                 "metrics": metrics,
                 "flow_m3h": s["flow_m3h"],
                 "matched": ok,
+                "lineage_ok": l_ok,
             }
         )
     seal_rows = conn.execute(
@@ -87,8 +94,11 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         "quota_m3d": permit["quota_m3d"],
         "caps": caps,
         "balanced": all_ok,
-        "proof_ready": all_ok and len(seal_rows) >= 1,
+        "proof_ready": all_ok and len(seal_rows) >= 1 and not lineage_missing,
         "seal_count": len(seal_rows),
+        "lineage_total": len(details),
+        "lineage_ok_count": len(details) - len(lineage_missing),
+        "lineage_missing": lineage_missing,
         "samples": details,
         "seals": [dict(x) for x in seal_rows],
     }

@@ -33,3 +33,10 @@ $env:PYTHONPATH="backend"
 python -m pytest
 python scripts/count_loc.py
 ```
+
+## 入库写边拍板（effluent-07，当班锁死）
+
+采样批落库与血缘父子边（`parent_child`）同事务写入，边不入则整笔回退拒收；
+影子边永不升正；同父批续采抢批锁，后到争用只记痕。
+详见 [docs/effluent_07_write_edge_decision.md](docs/effluent_07_write_edge_decision.md)。
+并发验证：`python scripts/ping_parent_sample_lock.py`。

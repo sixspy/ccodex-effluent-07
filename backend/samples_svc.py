@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
+from metric_lineage_svc import EDGE_FORMAL, EDGE_PARENT_CHILD, lineage_complete
 from models import SampleIn
 from validators import (
     adjudicate_exceed,
@@ -32,6 +33,23 @@ def _next_sample_code(conn, outfall_id: int) -> str:
     return f"SM-{prefix}-{n + 1:03d}"
 
 
+def _resolve_parent(conn, body: SampleIn):
+    """续采父批：显式指定须存在且同口；缺省自动衔接同排放口最新批；首批为根。"""
+    if body.parent_sample_id is not None:
+        parent = conn.execute(
+            "SELECT * FROM sample_batches WHERE id=?", (body.parent_sample_id,)
+        ).fetchone()
+        if not parent:
+            raise HTTPException(404, "父批不存在，入库拒收")
+        if parent["outfall_id"] != body.outfall_id:
+            raise HTTPException(400, "父批与续采排放口不一致，入库拒收")
+        return parent
+    return conn.execute(
+        "SELECT * FROM sample_batches WHERE outfall_id=? ORDER BY id DESC LIMIT 1",
+        (body.outfall_id,),
+    ).fetchone()
+
+
 @router.get("/api/samples")
 def list_samples(authorization: AuthHeader = None, status: str | None = None):
     require_user(authorization)
@@ -49,6 +67,7 @@ def list_samples(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["metrics"] = json.loads(d["metrics"] or "{}")
+            d["lineage_ok"] = lineage_complete(conn, r)
             items.append(d)
         return {"items": items}
 
@@ -82,21 +101,32 @@ def get_sample(sample_id: int, authorization: AuthHeader = None):
             "SELECT * FROM discharge_releases WHERE sample_id=? ORDER BY id DESC",
             (sample_id,),
         ).fetchall()
+        parent_edge = conn.execute(
+            """SELECT e.*, f.sample_code from_code FROM metric_lineage e
+               JOIN sample_batches f ON f.id=e.from_sample_id
+               WHERE e.to_sample_id=? AND e.edge_type=? AND e.status=?""",
+            (sample_id, EDGE_PARENT_CHILD, EDGE_FORMAL),
+        ).fetchone()
         return {
             "sample": data,
             "exceed_holds": [dict(h) for h in holds],
             "discharge_seals": [dict(s) for s in seals],
             "discharge_releases": [dict(r) for r in releases],
+            "parent_edge": dict(parent_edge) if parent_edge else None,
         }
 
 
 @router.post("/api/samples")
 def create_sample(body: SampleIn, authorization: AuthHeader = None):
-    user = require_writer(authorization)
+    user = require_user(authorization)  # 令牌解析无库操作，先定持锁人
     lock_key = f"outfall:{body.outfall_id}"
     with connect() as conn:
+        # 抢锁必须是本请求第一个库操作：前置查询若被 busy 拖过持锁窗口，
+        # 锁行已删，即成无锁双成。
         require_lock(conn, lock_key, user)
+        parent_lock = None
         try:
+            require_writer(authorization)  # 角色校验（只读账号禁止写入）
             outfall = conn.execute(
                 """SELECT o.*, p.status plant_status, p.design_cap_m3d
                    FROM outfalls o JOIN plants p ON p.id=o.plant_id WHERE o.id=?""",
@@ -130,6 +160,10 @@ def create_sample(body: SampleIn, authorization: AuthHeader = None):
                 "SELECT id FROM sample_batches WHERE sample_code=?", (code,)
             ).fetchone():
                 raise HTTPException(400, "采样编号已存在")
+            parent = _resolve_parent(conn, body)
+            if parent is not None:
+                parent_lock = f"sample:{parent['id']}"
+                require_lock(conn, parent_lock, user)
             status = "旁路挂起" if exceeded else "已裁定"
             adjudicated = None if exceeded else now_iso()
             cur = conn.execute(
@@ -149,6 +183,22 @@ def create_sample(body: SampleIn, authorization: AuthHeader = None):
                 ),
             )
             sid = cur.lastrowid
+            edge_id = None
+            if parent is not None:
+                # 甲路径：采样批落库瞬间血缘父子边同事务写入，失败则整笔回退拒收。
+                cur_edge = conn.execute(
+                    """INSERT INTO metric_lineage(from_sample_id,to_sample_id,edge_type,
+                       detail,status,created_at) VALUES (?,?,?,?,?,?)""",
+                    (
+                        parent["id"],
+                        sid,
+                        EDGE_PARENT_CHILD,
+                        f"续采父子边 {parent['sample_code']}→{code}",
+                        EDGE_FORMAL,
+                        now_iso(),
+                    ),
+                )
+                edge_id = cur_edge.lastrowid
             hold = None
             if exceeded:
                 hold_key = f"EX-{code}-{metric}"
@@ -178,6 +228,8 @@ def create_sample(body: SampleIn, authorization: AuthHeader = None):
                     "metrics": metrics,
                     "summary": metric_summary(metrics),
                     "exceed": exceeded,
+                    "parent_sample_id": parent["id"] if parent else None,
+                    "lineage_edge_id": edge_id,
                 },
             )
             conn.commit()
@@ -187,7 +239,14 @@ def create_sample(body: SampleIn, authorization: AuthHeader = None):
                 "status": status,
                 "exceed": exceeded,
                 "hold_key": hold,
+                "parent_sample_id": parent["id"] if parent else None,
+                "lineage_edge_id": edge_id,
             }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
+            if parent_lock:
+                release(conn, parent_lock, user)
             release(conn, lock_key, user)
             conn.commit()
